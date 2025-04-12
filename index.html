@@ -1,0 +1,574 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shooting Game</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #222; /* Dark background */
+            overflow: hidden; /* Prevent scrollbars */
+        }
+        canvas {
+            background: #333; /* Darker canvas */
+            display: block; /* Removes extra space below canvas */
+            cursor: none; /* Hide cursor over canvas */
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+
+        // --- Responsive Scaling Factor ---
+        let scaleFactor = 1;
+
+        function updateScaleFactor() {
+            scaleFactor = Math.min(window.innerWidth / 800, window.innerHeight / 600); // Adjust base dimensions as needed
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        // --- Game State ---
+        let gameRunning = true;
+        let gameOver = false;
+        let score = 0;
+        let highScore = 0;
+
+        // --- Gun ---
+        let gunX;
+        let gunY;
+        let gunWidth;
+        let gunHeight;
+        let gunSpeed;
+        let gunBoundary = {};
+
+        // --- Bullets ---
+        let bullets = [];
+        let bulletRadius;
+        let bulletSpeed;
+        const shootInterval = 300;
+        let shootTimer = null;
+        let totalBulletsFired = 0;
+
+        // --- Targets (Polygons) ---
+        let targets = [];
+        let targetSpawnInterval;
+        let targetSpawnTimer = null;
+        let targetBaseSize;
+        let targetFallSpeedMin;
+        let targetFallSpeedMax;
+        const targetDriftSpeedMax = 1;
+        const targetPulseSpeed = 0.1;
+        let targetSpeedMultiplier = 1.0;
+        const speedIncreaseInterval = 10000;
+        const speedMultiplierIncrement = 0.05;
+        let speedIncreaseTimer = null;
+        const targetTypes = [
+            { type: 'triangle', points: 3, color: '#ffcc00' },
+            { type: 'square', points: 1, color: '#00ccff' },
+            { type: 'pentagon', points: 5, color: '#ff6699' }
+        ];
+
+        // --- Input ---
+        let keys = {};
+        let gyroControlled = false;
+        let gyroSensitivity = 0.02; // Adjust as needed
+        let initialGyroX = null;
+        let tapLeft = false;
+        let tapRight = false;
+        const tapZoneRatio = 0.3; // Percentage of screen width for tap zones
+
+        // --- Helper Functions ---
+        function getRandomInt(min, max) {
+            return Math.floor(Math.random() * (max - min + 1)) + min;
+        }
+        function getRandomFloat(min, max) {
+            return Math.random() * (max - min) + min;
+        }
+
+        // --- High Score Handling ---
+        function loadHighScore() {
+            const storedHighScore = localStorage.getItem('polygonShooterHighScore');
+            if (storedHighScore) {
+                highScore = parseInt(storedHighScore, 10) || 0;
+            } else {
+                highScore = 0;
+            }
+            console.log("Loaded High Score:", highScore);
+        }
+
+        function saveHighScore() {
+             localStorage.setItem('polygonShooterHighScore', highScore.toString());
+             console.log("Saved High Score:", highScore);
+        }
+
+        function updateAndSaveHighScore() {
+            if (score > highScore) {
+                console.log(`New High Score! ${score} > ${highScore}`);
+                highScore = score;
+                saveHighScore();
+            }
+        }
+
+        // --- Drawing Functions ---
+        function drawGun() {
+            ctx.fillStyle = '#cccccc';
+            ctx.beginPath();
+            ctx.moveTo(gunX, gunY - gunHeight);
+            ctx.lineTo(gunX - gunWidth / 2, gunY);
+            ctx.lineTo(gunX + gunWidth / 2, gunY);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function drawBullets() {
+            bullets.forEach(bullet => {
+                ctx.beginPath();
+                ctx.arc(bullet.x, bullet.y, bullet.radius, 0, Math.PI * 2);
+                ctx.fillStyle = '#ff3300';
+                ctx.fill();
+                ctx.closePath();
+            });
+        }
+
+        function drawTargets() {
+            targets.forEach(target => {
+                ctx.fillStyle = target.color;
+                ctx.beginPath();
+                const angle = (Math.PI * 2) / target.sides;
+                for (let i = 0; i < target.sides; i++) {
+                    const currentAngle = i * angle + target.rotation;
+                    const xVertex = target.x + target.currentSize * Math.cos(currentAngle);
+                    const yVertex = target.y + target.currentSize * Math.sin(currentAngle);
+                    if (i === 0) ctx.moveTo(xVertex, yVertex);
+                    else ctx.lineTo(xVertex, yVertex);
+                }
+                ctx.closePath();
+                ctx.fill();
+            });
+        }
+
+        function drawTotalBulletCount() {
+            ctx.fillStyle = 'white';
+            ctx.font = `${16 * scaleFactor}px Arial`;
+            ctx.textAlign = 'left';
+            ctx.fillText(`Fired: ${totalBulletsFired}`, 10 * scaleFactor, 20 * scaleFactor);
+        }
+
+        function drawScore() {
+            ctx.fillStyle = 'white';
+            ctx.font = `${16 * scaleFactor}px Arial`;
+            ctx.textAlign = 'right';
+            ctx.fillText(`Score: ${score}`, canvas.width - (10 * scaleFactor), 20 * scaleFactor);
+        }
+
+        function drawHighScore() {
+            ctx.fillStyle = 'white';
+            ctx.font = `${16 * scaleFactor}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.fillText(`High Score: ${highScore}`, canvas.width / 2, 20 * scaleFactor);
+        }
+
+
+        // --- Update Functions ---
+        function updateGunPosition() {
+            if (gunX < gunWidth / 2) gunX = gunWidth / 2;
+            if (gunX > canvas.width - gunWidth / 2) gunX = canvas.width - gunWidth / 2;
+            gunBoundary = {
+                top: gunY - gunHeight, bottom: gunY,
+                left: gunX - gunWidth / 2, right: gunX + gunWidth / 2
+            };
+        }
+
+        function updateBullets() {
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const bullet = bullets[i];
+                bullet.y += bullet.speedY;
+                bullet.boundary = {
+                    top: bullet.y - bullet.radius, bottom: bullet.y + bullet.radius,
+                    left: bullet.x - bullet.radius, right: bullet.x + bullet.radius
+                };
+                if (bullet.boundary.top < 0) {
+                    bullets.splice(i, 1);
+                }
+            }
+        }
+
+        function triggerGameOver(reason) {
+             if (gameOver) return;
+             console.log(`GAME OVER - ${reason}`);
+             gameOver = true;
+             gameRunning = false;
+             stopShooting();
+             stopTargetSpawning();
+             stopSpeedIncrease();
+             updateAndSaveHighScore();
+        }
+
+
+        function updateTargets() {
+            for (let i = targets.length - 1; i >= 0; i--) {
+                 if (!gameRunning) break;
+
+                const target = targets[i];
+
+                target.y += target.speedY;
+                target.x += target.speedX;
+                target.rotation += target.rotationSpeed;
+
+                if (target.animation === 'pulse') {
+                    target.currentSize += target.pulseDirection * targetPulseSpeed * scaleFactor;
+                    if (target.currentSize >= target.maxSize || target.currentSize <= target.minSize) {
+                        target.pulseDirection *= -1;
+                    }
+                }
+
+                if (target.x - target.currentSize < 0 || target.x + target.currentSize > canvas.width) {
+                    target.speedX *= -1;
+                }
+
+                target.boundary = {
+                    top: target.y - target.currentSize, bottom: target.y + target.currentSize,
+                    left: target.x - target.currentSize, right: target.x + target.currentSize
+                };
+
+                if (
+                    gunBoundary.left < target.boundary.right &&
+                    gunBoundary.right > target.boundary.left &&
+                    gunBoundary.top < target.boundary.bottom &&
+                    gunBoundary.bottom > target.boundary.top
+                ) {
+                    triggerGameOver("Target hit gun!");
+                    return;
+                }
+
+                if (target.boundary.top > canvas.height) {
+                     triggerGameOver("Target reached bottom!");
+                     return;
+                }
+            }
+        }
+
+        // --- Game Logic ---
+        function shootBullet() {
+            if (gameRunning) {
+                totalBulletsFired++;
+                bullets.push({
+                    x: gunX, y: gunY - gunHeight, radius: bulletRadius,
+                    speedX: 0, speedY: -bulletSpeed,
+                    boundary: {
+                        top: gunY - gunHeight - bulletRadius, bottom: gunY - gunHeight + bulletRadius,
+                        left: gunX - bulletRadius, right: gunX + bulletRadius
+                    }
+                });
+            }
+        }
+
+        function createTarget() {
+            if (!gameRunning) return;
+
+            const typeInfo = targetTypes[getRandomInt(0, targetTypes.length - 1)];
+            const size = targetBaseSize * getRandomFloat(0.8, 1.5);
+            const startX = getRandomFloat(size, canvas.width - size);
+            const startY = -size * 2;
+            let sides;
+            switch (typeInfo.type) {
+                case 'triangle': sides = 3; break;
+                case 'square': sides = 4; break;
+                case 'pentagon': sides = 5; break;
+                default: sides = 4;
+            }
+            const animationType = Math.random() < 0.5 ? 'pulse' : 'drift';
+
+            targets.push({
+                x: startX, y: startY, type: typeInfo.type, sides: sides,
+                points: typeInfo.points, color: typeInfo.color, baseSize: size,
+                currentSize: size, minSize: size * 0.7, maxSize: size * 1.3,
+                speedY: getRandomFloat(targetFallSpeedMin, targetFallSpeedMax) * targetSpeedMultiplier * scaleFactor,
+                speedX: getRandomFloat(-targetDriftSpeedMax, targetDriftSpeedMax) * scaleFactor,
+                animation: animationType, pulseDirection: 1,
+                rotation: getRandomFloat(0, Math.PI * 2),
+                rotationSpeed: getRandomFloat(-0.02, 0.02) * scaleFactor,
+                boundary: {
+                    top: startY - size, bottom: startY + size,
+                    left: startX - size, right: startX + size
+                }
+            });
+        }
+
+        function checkBulletTargetCollisions() {
+             if (!gameRunning) return;
+
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const bullet = bullets[i];
+                let bulletRemoved = false;
+                for (let j = targets.length - 1; j >= 0; j--) {
+                     if (!targets[j]) continue;
+                    const target = targets[j];
+
+                    if (
+                        bullet.boundary.left < target.boundary.right &&
+                        bullet.boundary.right > target.boundary.left &&
+                        bullet.boundary.top < target.boundary.bottom &&
+                        bullet.boundary.bottom > target.boundary.top
+                    ) {
+                        score += target.points;
+                        targets.splice(j, 1);
+                        if (!bulletRemoved) {
+                            bullets.splice(i, 1);
+                            bulletRemoved = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // --- Timer Controls ---
+        function startShooting() {
+            stopShooting();
+            if (gameRunning) {
+                shootBullet();
+                shootTimer = setInterval(shootBullet, shootInterval);
+            }
+        }
+        function stopShooting() {
+            clearInterval(shootTimer);
+            shootTimer = null;
+        }
+        function startTargetSpawning() {
+            stopTargetSpawning();
+            if (gameRunning) {
+                createTarget();
+                targetSpawnTimer = setInterval(createTarget, targetSpawnInterval);
+            }
+        }
+        function stopTargetSpawning() {
+            clearInterval(targetSpawnTimer);
+            targetSpawnTimer = null;
+        }
+         function startSpeedIncrease() {
+             stopSpeedIncrease();
+            if (gameRunning) {
+                speedIncreaseTimer = setInterval(() => {
+                    targetSpeedMultiplier += speedMultiplierIncrement;
+                    console.log("Target speed multiplier increased to:", targetSpeedMultiplier.toFixed(2));
+                }, speedIncreaseInterval);
+            }
+        }
+        function stopSpeedIncrease() {
+            clearInterval(speedIncreaseTimer);
+            speedIncreaseTimer = null;
+        }
+
+        // --- Input Handling ---
+        function handleInput() {
+            if (!gameRunning) return;
+            if (!isMobile) {
+                if (keys['ArrowLeft'] && gunX > gunWidth / 2) gunX -= gunSpeed;
+                if (keys['ArrowRight'] && gunX < canvas.width - gunWidth / 2) gunX += gunSpeed;
+            } else {
+                if (gyroControlled) {
+                    // Gun position is updated in the gyro event listener
+                } else {
+                    if (tapLeft) gunX -= gunSpeed;
+                    if (tapRight) gunX += gunSpeed;
+                }
+            }
+        }
+
+        // --- Restart Game ---
+        function restartGame() {
+            console.log("Restarting game...");
+            score = 0;
+            totalBulletsFired = 0;
+            targetSpeedMultiplier = 1.0;
+            bullets = [];
+            targets = [];
+            keys = {};
+            tapLeft = false;
+            tapRight = false;
+            initialGyroX = null;
+            gyroControlled = false;
+
+            updateScaleFactor();
+            initializeGameObjects();
+
+            gameOver = false;
+            gameRunning = true;
+
+            startShooting();
+            startTargetSpawning();
+            startSpeedIncrease();
+
+            gameLoop();
+        }
+
+        // --- Mobile Controls ---
+        function setupMobileControls() {
+            if (!isMobile) return;
+
+            // Gyroscope Control
+            window.addEventListener('devicemotion', (event) => {
+                if (!gameRunning || !gyroControlled || event.rotationRate && (event.rotationRate.alpha || event.rotationRate.beta || event.rotationRate.gamma)) {
+                    let gamma = event.rotationRate.gamma;
+                    if (initialGyroX === null) {
+                        initialGyroX = gamma;
+                    }
+                    let deltaX = gamma - initialGyroX;
+                    gunX += deltaX / gyroSensitivity;
+                }
+            });
+
+            // Tap Controls
+            canvas.addEventListener('touchstart', (event) => {
+                const touchX = event.touches[0].clientX;
+                if (touchX < canvas.width * tapZoneRatio) {
+                    tapLeft = true;
+                    tapRight = false;
+                } else if (touchX > canvas.width * (1 - tapZoneRatio)) {
+                    tapRight = true;
+                    tapLeft = false;
+                }
+            });
+
+            canvas.addEventListener('touchend', () => {
+                tapLeft = false;
+                tapRight = false;
+            });
+
+            // Button to toggle Gyro control
+            const gyroButton = document.createElement('button');
+            gyroButton.textContent = 'Toggle Gyro Control';
+            gyroButton.style.position = 'absolute';
+            gyroButton.style.top = '10px';
+            gyroButton.style.left = '10px';
+            gyroButton.addEventListener('click', () => {
+                gyroControlled = !gyroControlled;
+                initialGyroX = null; // Reset initial gyro value when toggling
+                gyroButton.textContent = gyroControlled ? 'Disable Gyro' : 'Enable Gyro';
+            });
+            document.body.appendChild(gyroButton);
+        }
+
+
+        document.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+        });
+
+        document.addEventListener('keyup', (e) => {
+            keys[e.code] = false;
+        });
+
+        // --- Initialize Game Objects with Responsive Sizes and Speeds ---
+        function initializeGameObjects() {
+            gunWidth = 70 * scaleFactor;
+            gunHeight = 35 * scaleFactor;
+            gunSpeed = 7 * scaleFactor;
+            gunY = canvas.height - (30 * scaleFactor);
+            gunX = canvas.width / 2;
+
+            bulletRadius = 5 * scaleFactor;
+            bulletSpeed = 8 * scaleFactor;
+
+            targetBaseSize = 20 * scaleFactor;
+            targetFallSpeedMin = 1 * scaleFactor;
+            targetFallSpeedMax = 3 * scaleFactor;
+            targetSpawnInterval = 1000 / scaleFactor; // Adjust spawn rate based on scale
+        }
+
+        // --- Main Game Loop ---
+        function gameLoop() {
+            if (!gameRunning) {
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+                ctx.fillStyle = 'white';
+                ctx.textAlign = 'center';
+                if (gameOver) {
+                     ctx.font = `${50 * scaleFactor}px "Courier New", Courier, monospace`;
+                     ctx.fillStyle = '#ff3300';
+                     ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2 - (80 * scaleFactor));
+                     ctx.font = `${30 * scaleFactor}px "Courier New", Courier, monospace`;
+                     ctx.fillStyle = 'white';
+                     ctx.fillText(`Final Score: ${score}`, canvas.width / 2, canvas.height / 2 - (20 * scaleFactor));
+                     ctx.font = `${24 * scaleFactor}px "Courier New", Courier, monospace`;
+                     ctx.fillText(`High Score: ${highScore}`, canvas.width / 2, canvas.height / 2 + (20 * scaleFactor));
+                     ctx.font = `${20 * scaleFactor}px "Courier New", Courier, monospace`;
+                     ctx.fillText('Press R to Restart', canvas.width / 2, canvas.height / 2 + (60 * scaleFactor));
+                } else {
+                    ctx.font = `${40 * scaleFactor}px "Courier New", Courier, monospace`;
+                    ctx.fillText('PAUSED', canvas.width / 2, canvas.height / 2 - (30 * scaleFactor));
+                    ctx.font = `${20 * scaleFactor}px "Courier New", Courier, monospace`;
+                    ctx.fillText('Press P to Resume', canvas.width / 2, canvas.height / 2 + (20 * scaleFactor));
+                }
+                return;
+            }
+
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            handleInput();
+            updateGunPosition();
+            updateBullets();
+            updateTargets();
+
+            if (gameRunning) {
+                 checkBulletTargetCollisions();
+            }
+
+            drawGun();
+            drawBullets();
+            drawTargets();
+            drawTotalBulletCount();
+            drawScore();
+            drawHighScore();
+
+            if (gameRunning) {
+                requestAnimationFrame(gameLoop);
+            } else {
+                requestAnimationFrame(gameLoop);
+            }
+        }
+
+        // --- Initialization ---
+        function initializeGame() {
+            console.log("Initializing game...");
+            loadHighScore();
+            updateScaleFactor();
+            initializeGameObjects();
+            if (isMobile) {
+                setupMobileControls();
+            }
+            gameRunning = true;
+            gameOver = false;
+            startShooting();
+            startTargetSpawning();
+            startSpeedIncrease();
+            gameLoop();
+        }
+
+        window.onload = initializeGame;
+
+        window.addEventListener('resize', () => {
+            updateScaleFactor();
+            initializeGameObjects();
+            if (!keys['ArrowLeft'] && !keys['ArrowRight'] && !tapLeft && !tapRight) {
+                 gunX = canvas.width / 2;
+             }
+            updateGunPosition();
+            if (!gameRunning) {
+                requestAnimationFrame(gameLoop);
+            }
+        });
+    </script>
+</body>
+</html>
